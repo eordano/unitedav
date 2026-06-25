@@ -1,0 +1,14 @@
+{
+    "name": "UnitedAV.Samples.Showcase",
+    "rootNamespace": "UnitedAV.Samples.Showcase",
+    "references": [
+        "UnitedAV.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0
+     UnitedAV mic + speaker test (browser audio I/O):
+       - SPEAKER: a WebAudio 440 Hz tone -> destination, with a level meter on the
+         generated signal (audible live; meter confirms the output graph produces
+         signal headless too).
+       - MIC: getUserMedia(audio) -> AnalyserNode, live input level meter; PASS when
+         a signal is detected.
+     Live: shows the real Mac mic/speaker (grant the mic prompt). Headless/auto:
+     run Chrome with --use-fake-device-for-media-stream --use-fake-ui-for-media-stream
+     (fake mic emits a tone, permission auto-granted) -> deterministic PASS.
+     Verdict is console.log'd as "UAVRESULT ..." for the driver. -->
+<html><head><meta charset="utf-8"><title>UnitedAV mic + speaker</title>
+<style>
+html,body{margin:0;height:100%;background:#0b0f14;color:#e8eef5;font:400 18px -apple-system,system-ui,sans-serif;overflow:hidden}
+#wrap{display:flex;flex-direction:column;gap:34px;align-items:center;justify-content:center;height:100%}
+h1{font:700 34px -apple-system,system-ui;margin:0 0 6px}
+.row{display:flex;align-items:center;gap:18px;width:70vw;max-width:760px}
+.lab{width:150px;font-weight:600;font-size:22px}
+.bar{flex:1;height:42px;background:#172230;border-radius:8px;overflow:hidden;position:relative}
+.fill{height:100%;width:0;background:linear-gradient(90deg,#2ecc71,#f1c40f,#e74c3c);transition:width .06s linear}
+.val{width:120px;text-align:right;font-variant-numeric:tabular-nums;color:#9fb3c8}
+#status{font-size:17px;color:#9fb3c8;margin-top:8px}
+.ok{color:#2ecc71}.bad{color:#e74c3c}
+#go{margin-top:6px;padding:14px 28px;font:600 20px -apple-system,system-ui;color:#05080c;
+   background:#2ecc71;border:0;border-radius:10px;cursor:pointer}
+#go:hover{background:#3fe085}
+</style></head>
+<body><div id="wrap">
+<div><h1>UnitedAV — Mic &amp; Speaker</h1></div>
+<div class="row"><div class="lab">🔊 Speaker</div><div class="bar"><div id="spkFill" class="fill"></div></div><div id="spkVal" class="val">—</div></div>
+<div class="row"><div class="lab">🎙 Mic</div><div class="bar"><div id="micFill" class="fill"></div></div><div id="micVal" class="val">—</div></div>
+<button id="go">▶ Start mic + speaker</button>
+<div id="status">click ▶ to grant the mic and start</div>
+</div>
+<script>
+const params = new URLSearchParams(location.search);
+const ST = document.getElementById('status');
+let reported = false;
+function setStatus(m, cls){ ST.textContent = m; ST.className = cls || ''; }
+function report(msg){ if (reported) return; reported = true; console.log('UAVRESULT ' + msg); }
+
+function rmsOf(an, buf){ an.getFloatTimeDomainData(buf); let s=0;
+  for (let i=0;i<buf.length;i++) s += buf[i]*buf[i]; return Math.sqrt(s/buf.length); }
+function bar(fill, val, rms){
+  const norm = Math.min(1, rms / 0.3);                // ~ -10 dBFS full
+  fill.style.width = (norm*100).toFixed(1) + '%';
+  val.textContent = (rms>1e-5 ? (20*Math.log10(rms)).toFixed(1)+' dBFS' : '−∞');
+}
+
+async function begin(){
+  let ac;
+  try { ac = new (window.AudioContext||window.webkitAudioContext)(); } catch(e){ return report('FAIL no-audiocontext'); }
+  try { await ac.resume(); } catch(e){}
+
+  // SPEAKER: tone -> gain -> analyser -> destination.
+  const osc = ac.createOscillator(); osc.type='sine'; osc.frequency.value=440;
+  const g = ac.createGain(); g.gain.value=0.15;
+  const spkAn = ac.createAnalyser(); spkAn.fftSize=2048;
+  osc.connect(g); g.connect(spkAn); spkAn.connect(ac.destination); osc.start();
+
+  // MIC: getUserMedia -> analyser.
+  let micAn=null, micErr=null;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
+    const src = ac.createMediaStreamSource(stream);
+    micAn = ac.createAnalyser(); micAn.fftSize=2048; src.connect(micAn);
+  } catch(e){ micErr = (e && e.name) ? e.name : (''+e); }
+
+  const sb = new Float32Array(2048), mb = new Float32Array(2048);
+  const spkFill=document.getElementById('spkFill'), spkVal=document.getElementById('spkVal');
+  const micFill=document.getElementById('micFill'), micVal=document.getElementById('micVal');
+  let spkPeak=0, micPeak=0, frames=0;
+  const REPORT_AT = 180;   // ~3s @60fps: enough to detect signal, then keep running live
+
+  function loop(){
+    const sr = rmsOf(spkAn, sb); if (sr>spkPeak) spkPeak=sr; bar(spkFill, spkVal, sr);
+    let mr=0; if (micAn){ mr = rmsOf(micAn, mb); if (mr>micPeak) micPeak=mr; }
+    bar(micFill, micVal, mr);
+    if (++frames === REPORT_AT){
+      const spkOk = spkPeak > 1e-3;
+      const micOk = !!micAn && micPeak > 1e-3;
+      const verdict = (spkOk && micOk) ? 'PASS' : 'FAIL';
+      setStatus(`${verdict} — speaker ${spkOk?'OK':'silent'}, mic ${micAn?(micOk?'OK':'silent'):('unavailable: '+micErr)} · ${ac.sampleRate} Hz`,
+                verdict==='PASS'?'ok':'bad');
+      report(`${verdict} speaker_rms=${spkPeak.toFixed(4)} mic_rms=${micPeak.toFixed(4)} `
+            +`mic=${micAn?'ok':(micErr||'unavailable')} ctx=${ac.state} rate=${ac.sampleRate}`);
+    } else if (frames < REPORT_AT){
+      setStatus(micAn ? 'measuring…' : (micErr ? 'mic: '+micErr+' (speaker still tested)' : 'requesting mic…'));
+    }
+    requestAnimationFrame(loop);   // keep meters live for the demo
+  }
+  requestAnimationFrame(loop);
+}
+// Gate behind a user gesture so the AudioContext + mic start from a real click
+// (browsers block autoplay/mic without one). Headless tests pass ?auto to bypass.
+const go = document.getElementById('go');
+function start(){ go.style.display='none'; begin().catch(e => report('FAIL ' + (e && e.message ? e.message : e))); }
+if (params.has('auto')) start(); else go.addEventListener('click', start, { once:true });
+</script></body></html>

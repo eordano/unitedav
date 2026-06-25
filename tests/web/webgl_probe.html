@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0
+     UnitedAV WebGL backend verifier. Loads a video into an HTMLVideoElement
+     (browser-native decode), uploads the frame to a WebGL2 texture, renders it,
+     reads pixels back, and checks:
+       (1) WebGL-readback vs a 2D-canvas drawImage of the SAME frame  -> proves the
+           WebGL texture-upload path is correct (this is what the .jslib does);
+       (2) vs an ffmpeg-decoded oracle frame (oracle.rgba)            -> cross-decoder
+           sanity that the browser decoded the right pixels.
+     The result is written to <title>/#result; the test driver reads it via
+     `chromium --headless --dump-dom`. -->
+<html><head><meta charset="utf-8"><title>PENDING</title></head>
+<body style="margin:0;background:#000">
+<canvas id="c" width="320" height="240"></canvas>
+<pre id="result">PENDING</pre>
+<script>
+const W = 320, H = 240;
+const params = new URLSearchParams(location.search);
+const CLIP = params.get('clip') || 'clip.webm';
+function done(msg){ document.getElementById('result').textContent = msg; document.title = msg;
+  console.log('UAVRESULT ' + msg); }
+
+function meanAbsRGB(a, b){            // a,b: Uint8Array(W*H*4), top-down both
+  let s = 0, mx = 0;
+  for (let i = 0; i < W*H; i++)
+    for (let c = 0; c < 3; c++){
+      const d = Math.abs(a[i*4+c] - b[i*4+c]);
+      s += d; if (d > mx) mx = d;
+    }
+  return { mean: s/(3*W*H), max: mx };
+}
+function flipY(buf){                  // GL readPixels is bottom-up -> top-down
+  const out = new Uint8Array(buf.length), row = W*4;
+  for (let y = 0; y < H; y++) out.set(buf.subarray((H-1-y)*row, (H-y)*row), y*row);
+  return out;
+}
+
+async function main(){
+  const v = document.createElement('video');
+  v.muted = true; v.crossOrigin = 'anonymous'; v.playsInline = true; v.preload = 'auto';
+  v.src = CLIP;
+  await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej('video-load-error'); });
+  // Force a decoded frame to be current (play briefly; muted so autoplay is allowed).
+  try { await v.play(); } catch (e) { /* still usable at HAVE_CURRENT_DATA */ }
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  if (v.readyState < 2) return done('FAIL video-no-data');
+
+  const gl = document.getElementById('c').getContext('webgl2', { preserveDrawingBuffer: true });
+  if (!gl) return done('FAIL no-webgl2');
+
+  // Upload the video frame to a GL texture (the core .jslib operation).
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v); }
+  catch (e) { return done('FAIL texImage2D ' + e); }
+
+  // Fullscreen-triangle passthrough.
+  const vs = `#version 300 es
+  out vec2 uv;
+  void main(){ vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2);
+    uv = p; gl_Position = vec4(p*2.0-1.0, 0.0, 1.0); }`;
+  const fs = `#version 300 es
+  precision highp float; in vec2 uv; out vec4 o; uniform sampler2D t;
+  void main(){ o = texture(t, uv); }`;
+  const mk = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s); return s; };
+  let prog;
+  try { prog = gl.createProgram(); gl.attachShader(prog, mk(gl.VERTEX_SHADER, vs));
+        gl.attachShader(prog, mk(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw gl.getProgramInfoLog(prog); }
+  catch (e) { return done('FAIL shader ' + e); }
+  gl.useProgram(prog);
+  gl.viewport(0, 0, W, H);
+  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  const raw = new Uint8Array(W*H*4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, raw);
+
+  // Reference: the same video frame via a 2D canvas (top-down).
+  const cc = document.createElement('canvas'); cc.width = W; cc.height = H;
+  const ctx = cc.getContext('2d'); ctx.drawImage(v, 0, 0, W, H);
+  const ref = ctx.getImageData(0, 0, W, H).data;
+
+  // readPixels is bottom-up; pick the orientation that matches and report it.
+  const dTop = meanAbsRGB(raw, ref);
+  const dFlip = meanAbsRGB(flipY(raw), ref);
+  const flipped = dFlip.mean < dTop.mean;
+  const dWeb = flipped ? dFlip : dTop;
+
+  // Cross-decoder oracle (optional): ffmpeg's RGBA of the same frame.
+  let oracleMsg = 'oracle=skip';
+  try {
+    const ob = new Uint8Array(await (await fetch('oracle.rgba')).arrayBuffer());
+    if (ob.length === W*H*4) {
+      const gpuTop = flipped ? flipY(raw) : raw;
+      const dO = meanAbsRGB(gpuTop, ob);
+      oracleMsg = `oracle_mean=${dO.mean.toFixed(3)} oracle_max=${dO.max}`;
+    }
+  } catch (e) { oracleMsg = 'oracle=fetch-fail'; }
+
+  const verdict = dWeb.mean < 2.0 ? 'PASS' : 'FAIL';
+  done(`${verdict} webgl_vs_2d_mean=${dWeb.mean.toFixed(3)} max=${dWeb.max} `
+     + `flip=${flipped} ${oracleMsg} ${W}x${H}`);
+}
+main().catch(e => done('FAIL ' + (e && e.message ? e.message : e)));
+</script></body></html>

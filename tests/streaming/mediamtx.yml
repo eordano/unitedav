@@ -1,0 +1,52 @@
+# UnitedAV — mediamtx (MIT) config for the streaming validation matrix.
+#
+# Serves ONE source path ("synthetic") over RTSP / RTMP / SRT / HLS so the
+# decoder can pull the same clip back over every live transport. Ports are
+# shifted off mediamtx defaults to avoid collisions with anything already
+# bound on the box (the default HLS :8888 was observed in use here).
+#
+# Usage (see launch.sh): an ffmpeg process PUBLISHES a generated clip into the
+# "synthetic" path; clients PULL it over each protocol's URL:
+#   RTSP : rtsp://127.0.0.1:8554/synthetic
+#   RTMP : rtmp://127.0.0.1:1936/synthetic
+#   SRT  : srt://127.0.0.1:8890?streamid=read:synthetic
+#   HLS  : http://127.0.0.1:8889/synthetic/index.m3u8
+
+logLevel: info
+logDestinations: [stdout]
+
+# --- no API / metrics / pprof / playback needed for the test harness ---
+api: no
+metrics: no
+pprof: no
+playback: no
+
+# --- RTSP ---
+rtsp: yes
+rtspTransports: [tcp, udp]
+rtspAddress: :8554
+
+# --- RTMP ---
+rtmp: yes
+rtmpAddress: :1936
+
+# --- HLS (Low-Latency off for max client/libavformat compatibility) ---
+hls: yes
+hlsAddress: :8889
+hlsVariant: mpegts
+hlsAlwaysRemux: yes
+
+# --- SRT ---
+srt: yes
+srtAddress: :8890
+
+# --- WebRTC disabled (validated separately; not a libavformat transport) ---
+webrtc: no
+
+# Paths: publishers/readers connect on demand.
+#   synthetic  -> used by run-matrix.sh (ffmpeg publishes here).
+#   all_others -> catch-all so the OBS broadcast e2e (obs-e2e.sh) can publish to
+#                 "live/test" (rtmp://.../live/test) without a per-path stanza.
+paths:
+  synthetic:
+  all_others:

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0
+     UnitedAV web demos — landing page (served over http by tests/web/serve.sh or
+     deployed to GitHub Pages by .github/workflows/deploy.yml). -->
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UnitedAV — web demos</title>
+<style>
+:root{color-scheme:dark}
+html,body{margin:0;min-height:100%;background:#070b10;color:#e8eef5;font:400 17px/1.5 -apple-system,system-ui,sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:56px 24px 80px}
+h1{font-size:40px;margin:0 0 6px} .sub{color:#8fb3c8;margin:0 0 36px}
+a.card{display:block;text-decoration:none;color:inherit;background:#0e151d;border:1px solid #1b2734;
+  border-radius:12px;padding:18px 20px;margin:14px 0;transition:border-color .15s,transform .05s}
+a.card:hover{border-color:#2ecc71;transform:translateY(-1px)}
+.t{font-weight:600;font-size:20px} .d{color:#9fb3c8;font-size:15px;margin-top:3px}
+.tag{display:inline-block;font-size:12px;color:#05080c;background:#2ecc71;border-radius:6px;padding:1px 8px;margin-left:8px;vertical-align:middle}
+footer{color:#5e7488;font-size:13px;margin-top:36px;border-top:1px solid #1b2734;padding-top:16px}
+code{background:#0e151d;border:1px solid #1b2734;border-radius:5px;padding:1px 6px;font-size:13px}
+</style></head>
+<body><div class="wrap">
+<h1>UnitedAV</h1>
+<p class="sub">An original, Apache-2.0, FFmpeg/LGPL audio-video plugin for Unity — web backends (WebGL + WebGPU) over the browser's own video stack.</p>
+
+<a class="card" href="webgpu_showcase.html"><div class="t">WebGPU showcase <span class="tag">WebGPU</span></div>
+  <div class="d">A ring of video screens with an orbiting camera — the Unity Showcase, ported to a standalone WebGPU 3D scene.</div></a>
+
+<a class="card" href="web_player.html?mode=webgpu"><div class="t">WebGPU player</div>
+  <div class="d">Full-window playback. WebCodecs + a WGSL shader apply the clip's signalled colorspace (exact colour with software decode; browser-conversion fallback otherwise).</div></a>
+
+<a class="card" href="web_player.html?mode=webgl"><div class="t">WebGL player</div>
+  <div class="d">Full-window playback via <code>texImage2D(video)</code> into a WebGL2 texture.</div></a>
+
+<a class="card" href="av_io_test.html"><div class="t">Mic &amp; speaker test</div>
+  <div class="d">WebAudio tone to the speaker + <code>getUserMedia</code> mic capture with live level meters. Click to grant the mic.</div></a>
+
+<a class="card" href="webgpu_probe.html"><div class="t">WebGPU verifier</div>
+  <div class="d">Decode → GPUTexture → readback, checked against a 2D-canvas reference + ffmpeg oracle.</div></a>
+
+<footer>Native plugin: CPU + hardware decode (VAAPI / VideoToolbox / D3D11 / NVDEC) with zero-copy GPU present
+(GL / D3D11 / Metal / Vulkan). The web pages use the browser's own decode + WebGL/WebGPU upload, behind the
+same C# surface. Built &amp; deployed by Nix + GitHub Actions.</footer>
+</div></body></html>

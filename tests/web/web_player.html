@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0
+     UnitedAV web player demo: continuously plays a looping clip and renders every
+     frame through the chosen path, full-window, with a label. For the demo recording.
+       ?mode=webgl  : HTMLVideoElement -> texImage2D(video) each frame (WebGL2).
+       ?mode=webgpu : HTMLVideoElement -> WebCodecs planes -> WGSL (clip's matrix),
+                      the colour-correct path (see tests/web/README.md). -->
+<html><head><meta charset="utf-8"><title>UnitedAV web player</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}
+#c{width:100vw;height:100vh;display:block;object-fit:contain}
+#l{position:fixed;left:24px;top:18px;font:600 30px -apple-system,system-ui,sans-serif;
+   color:#fff;text-shadow:0 2px 8px #000;letter-spacing:.5px}
+#s{position:fixed;left:24px;top:60px;font:400 16px -apple-system,system-ui,sans-serif;color:#7CFC8A;text-shadow:0 1px 4px #000}</style>
+</head><body>
+<canvas id="c"></canvas><div id="l">UnitedAV</div><div id="s"></div>
+<script>
+const params = new URLSearchParams(location.search);
+const CLIP = params.get('clip') || 'clip.webm';
+const MODE = params.get('mode') || 'webgl';
+const L = document.getElementById('l'), S = document.getElementById('s');
+const canvas = document.getElementById('c');
+
+function coeffs(m){ if(m==='bt709')return[0.2126,0.0722];
+  if(m==='bt470bg'||m==='smpte170m')return[0.299,0.114];
+  if(m==='bt2020-ncl'||m==='bt2020-cl')return[0.2627,0.0593]; return [0.299,0.114]; }
+function makeMat(kr,kb,full){ const kg=1-kr-kb; let ys,yb,cs;
+  if(full){ys=1;yb=0;cs=1;}else{ys=255/(235-16);yb=16/255;cs=255/(240-16);}
+  return new Float32Array([ys,0,cs*(2-2*kr),0, ys,-cs*(2*kb*(1-kb)/kg),-cs*(2*kr*(1-kr)/kg),0,
+    ys,cs*(2-2*kb),0,0, yb,0.5,0.5,0]); }
+
+async function start(){
+  if(location.protocol==='file:'){
+    L.textContent='UnitedAV — serve over http, not file://';
+    S.textContent='Run: bash tests/web/serve.sh  then open http://127.0.0.1:8137/web_player.html?mode='+MODE
+      +'   (file:// is a unique origin → video/WebCodecs/WebGPU are blocked)';
+    return;
+  }
+  const v=document.createElement('video');
+  v.muted=true; v.loop=true; v.crossOrigin='anonymous'; v.playsInline=true; v.src=CLIP;
+  await new Promise((res,rej)=>{v.onloadeddata=res; v.onerror=()=>rej('load');});
+  await v.play();
+  const W=v.videoWidth, H=v.videoHeight; canvas.width=W; canvas.height=H;
+
+  if(MODE==='webgpu'){
+    if(!navigator.gpu){ S.textContent='no WebGPU'; return webglFallback(v,W,H); }
+    const adapter=await navigator.gpu.requestAdapter(); const device=await adapter.requestDevice();
+    const adp='adapter='+((adapter.info&&adapter.info.vendor)||'?')+'/'+((adapter.info&&adapter.info.architecture)||'?');
+    const fmt=navigator.gpu.getPreferredCanvasFormat();
+    const ctx=canvas.getContext('webgpu'); ctx.configure({device,format:fmt,alphaMode:'opaque'});
+    const sampler=device.createSampler({magFilter:'linear',minFilter:'linear'});
+    const VS=`struct VO{@builtin(position) p:vec4f,@location(0) uv:vec2f};
+      @vertex fn vs(@builtin(vertex_index) i:u32)->VO{var q=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));
+        var o:VO; o.p=vec4f(q[i],0,1); o.uv=(q[i]*vec2f(0.5,-0.5))+vec2f(0.5); return o;}`;
+    // (A) colour-correct YUV->RGB pipeline (needs raw Y/U/V from a SW-decoded frame).
+    const yuvSh=device.createShaderModule({code:VS+`
+      struct CM{m0:vec4f,m1:vec4f,m2:vec4f,yoff:vec4f};
+      @group(0)@binding(0) var s:sampler; @group(0)@binding(1) var tY:texture_2d<f32>;
+      @group(0)@binding(2) var tU:texture_2d<f32>; @group(0)@binding(3) var tV:texture_2d<f32>;
+      @group(0)@binding(4) var<uniform> cm:CM;
+      @fragment fn fs(o:VO)->@location(0) vec4f{
+        let y=textureSample(tY,s,o.uv).r; let u=textureSample(tU,s,o.uv).r; let w=textureSample(tV,s,o.uv).r;
+        let ycc=vec3f(y,u,w)-cm.yoff.xyz;
+        return vec4f(clamp(vec3f(dot(cm.m0.xyz,ycc),dot(cm.m1.xyz,ycc),dot(cm.m2.xyz,ycc)),vec3f(0),vec3f(1)),1.0);}`});
+    const yuvPipe=device.createRenderPipeline({layout:'auto',vertex:{module:yuvSh,entryPoint:'vs'},
+      fragment:{module:yuvSh,entryPoint:'fs',targets:[{format:fmt}]},primitive:{topology:'triangle-list'}});
+    const cbuf=device.createBuffer({size:64,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    const mkTex=(pw,ph)=>device.createTexture({size:[pw,ph],format:'r8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+    let tY=null,tU=null,tV=null,yuvBg=null,tw=-1,th=-1;
+    // (B) fallback: browser's own conversion (copyExternalImageToTexture) for HW
+    //     frames whose raw YUV is hidden (format=null). Always works; browser colour.
+    const rgbaSh=device.createShaderModule({code:VS+`
+      @group(0)@binding(0) var s:sampler; @group(0)@binding(1) var t:texture_2d<f32>;
+      @fragment fn fs(o:VO)->@location(0) vec4f{ return textureSample(t,s,o.uv); }`});
+    const rgbaPipe=device.createRenderPipeline({layout:'auto',vertex:{module:rgbaSh,entryPoint:'vs'},
+      fragment:{module:rgbaSh,entryPoint:'fs',targets:[{format:fmt}]},primitive:{topology:'triangle-list'}});
+    let rgbaTex=null,rgbaBg=null,rw=-1,rh=-1;
+    function present(pipe,bg){ const enc=device.createCommandEncoder();
+      const pass=enc.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});
+      pass.setPipeline(pipe); pass.setBindGroup(0,bg); pass.draw(3); pass.end(); device.queue.submit([enc.finish()]); }
+    async function frame(){
+      try{
+        const vf=new VideoFrame(v); const vfmt=vf.format;
+        if(vfmt==='NV12'||vfmt==='I420'||vfmt==='I420A'){          // raw YUV -> exact colour
+          const cw=vf.codedWidth, ch=vf.codedHeight, cwh=cw>>1, chh=ch>>1;
+          const ab=new ArrayBuffer(vf.allocationSize()); const lay=await vf.copyTo(ab); const u8=new Uint8Array(ab);
+          const pl=(i,pw,ph)=>{const o=lay[i].offset,st=lay[i].stride,out=new Uint8Array(pw*ph);
+            for(let y=0;y<ph;y++)out.set(u8.subarray(o+y*st,o+y*st+pw),y*pw); return out;};
+          let yA,uA,vA;
+          if(vfmt==='NV12'){yA=pl(0,cw,ch); const o=lay[1].offset,st=lay[1].stride; uA=new Uint8Array(cwh*chh); vA=new Uint8Array(cwh*chh);
+            for(let y=0;y<chh;y++)for(let x=0;x<cwh;x++){const s=o+y*st+x*2; uA[y*cwh+x]=u8[s]; vA[y*cwh+x]=u8[s+1];}}
+          else{yA=pl(0,cw,ch);uA=pl(1,cwh,chh);vA=pl(2,cwh,chh);}
+          const cs=vf.colorSpace||{}; const [kr,kb]=coeffs(cs.matrix);
+          device.queue.writeBuffer(cbuf,0,makeMat(kr,kb,!!cs.fullRange));
+          if(tw!==cw||th!==ch){ if(tY){tY.destroy();tU.destroy();tV.destroy();}
+            tY=mkTex(cw,ch); tU=mkTex(cwh,chh); tV=mkTex(cwh,chh); tw=cw; th=ch;
+            yuvBg=device.createBindGroup({layout:yuvPipe.getBindGroupLayout(0),entries:[
+              {binding:0,resource:sampler},{binding:1,resource:tY.createView()},{binding:2,resource:tU.createView()},
+              {binding:3,resource:tV.createView()},{binding:4,resource:{buffer:cbuf}}]}); }
+          device.queue.writeTexture({texture:tY},yA,{bytesPerRow:cw,rowsPerImage:ch},[cw,ch]);
+          device.queue.writeTexture({texture:tU},uA,{bytesPerRow:cwh,rowsPerImage:chh},[cwh,chh]);
+          device.queue.writeTexture({texture:tV},vA,{bytesPerRow:cwh,rowsPerImage:chh},[cwh,chh]);
+          vf.close(); present(yuvPipe,yuvBg);
+          L.textContent='UnitedAV — WebGPU (WebCodecs + WGSL, clip colorspace)'; S.textContent=adp+' · exact colour';
+        } else {                                                   // HW null-format -> browser conversion
+          vf.close();
+          if(rw!==W||rh!==H){ if(rgbaTex)rgbaTex.destroy();
+            rgbaTex=device.createTexture({size:[W,H],format:fmt,usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT}); rw=W; rh=H;
+            rgbaBg=device.createBindGroup({layout:rgbaPipe.getBindGroupLayout(0),entries:[{binding:0,resource:sampler},{binding:1,resource:rgbaTex.createView()}]}); }
+          device.queue.copyExternalImageToTexture({source:v},{texture:rgbaTex,premultipliedAlpha:false},[W,H]);
+          present(rgbaPipe,rgbaBg);
+          L.textContent='UnitedAV — WebGPU (browser conversion — HW decode)';
+          S.textContent=adp+' · raw YUV hidden by HW decode; launch with --disable-accelerated-video-decode for exact colour';
+        }
+      }catch(e){ S.textContent='wgpu '+e; }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  } else { webglFallback(v,W,H); }
+}
+
+function webglFallback(v,W,H){
+  L.textContent='UnitedAV — WebGL (texImage2D, browser conversion)';
+  const gl=canvas.getContext('webgl2'); if(!gl){S.textContent='no WebGL2';return;}
+  const tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  const vs=`#version 300 es
+    out vec2 uv; void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2); uv=vec2(p.x,1.0-p.y); gl_Position=vec4(p*2.0-1.0,0,1);}`;
+  const fs=`#version 300 es
+    precision highp float; in vec2 uv; out vec4 o; uniform sampler2D t; void main(){o=texture(t,uv);}`;
+  const c=(t,s)=>{const sh=gl.createShader(t);gl.shaderSource(sh,s);gl.compileShader(sh);return sh;};
+  const pr=gl.createProgram(); gl.attachShader(pr,c(gl.VERTEX_SHADER,vs)); gl.attachShader(pr,c(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(pr); gl.useProgram(pr); const vao=gl.createVertexArray(); gl.bindVertexArray(vao);
+  function frame(){ if(v.readyState>=2){ gl.viewport(0,0,W,H); gl.bindTexture(gl.TEXTURE_2D,tex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,v); gl.drawArrays(gl.TRIANGLES,0,3); } requestAnimationFrame(frame); }
+  requestAnimationFrame(frame);
+}
+start().catch(e=>{ S.textContent='error '+e; });
+</script></body></html>

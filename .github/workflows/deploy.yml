@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: Apache-2.0
+name: build, deploy & release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build everything (Nix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: nix build .#default .#vulkan
+        run: nix build .#default .#vulkan -L
+      - name: Unit tests (doctest)
+        run: |
+          nix develop -c bash -c '
+            cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release &&
+            cmake --build native/build --target uav_tests &&
+            ./native/build/uav_tests'
+
+  deploy:
+    name: Deploy web demos to Pages
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: "Generate clips (LGPL ffmpeg: vp8/vp9/av1/opus)"
+        run: nix develop -c bash tests/media/gen.sh || true
+      - name: Assemble site/
+        run: |
+          mkdir -p site
+          cp tests/web/index.html tests/web/web_player.html tests/web/webgl_probe.html \
+             tests/web/webgpu_probe.html tests/web/av_io_test.html tests/web/webgpu_showcase.html site/
+          cp tests/media/out/webm__vp9__opus.webm   site/clip.webm
+          cp tests/media/out/webm__vp9__opus.webm   site/clip0.webm
+          cp tests/media/out/webm__vp8__vorbis.webm site/clip1.webm || cp site/clip0.webm site/clip1.webm
+          cp tests/media/out/webm__av1__opus.webm   site/clip2.webm || cp site/clip0.webm site/clip2.webm
+          ls -la site
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+
+  release:
+    name: Publish release artifacts
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build native artifacts (Nix, LGPL FFmpeg)
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          stage="unitedav-${ver}-linux-x86_64"
+          mkdir -p "$stage/lib" "$stage/include"
+          nix build .#default -L --out-link result-default
+          nix build .#vulkan  -L --out-link result-vulkan
+          cp -L result-default/lib/libUnitedAV.so "$stage/lib/libUnitedAV.so"
+          cp -L result-vulkan/lib/libUnitedAV.so  "$stage/lib/libUnitedAV-vulkan.so"
+          cp -L result-default/include/*.h        "$stage/include/"
+          cp LICENSE NOTICE                       "$stage/"
+          chmod -R u+w "$stage"
+          nix run nixpkgs#patchelf -- --set-rpath "\$ORIGIN" \
+            "$stage/lib/libUnitedAV.so" "$stage/lib/libUnitedAV-vulkan.so"
+          tar -czf "${stage}.tar.gz" "$stage"
+
+      - name: Pack UPM package (C# API)
+        run: |
+          set -euo pipefail
+          cd unity
+          npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+          npm pack
+          mv org.unitedav-*.tgz ..
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=(unitedav-*-linux-x86_64.tar.gz org.unitedav-*.tgz)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "UnitedAV $GITHUB_REF_NAME" \
+              --generate-notes \
+              "${assets[@]}"
+          fi

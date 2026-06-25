@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0
+     WebGPU color diagnostic: figure out the ZERO-COPY path's color behavior.
+     Reports, for the same decoded frame:
+       - VideoFrame.colorSpace (matrix/primaries/transfer/fullRange) + format
+       - importExternalTexture (ZERO-COPY) readback vs 2D-canvas + ffmpeg oracle
+       - a per-channel affine fit (external -> 2D) to characterize the mismatch
+       - a manual YUV->RGB via WebCodecs copyTo planes + WGSL with the clip's matrix
+         (COPY-based, reference for what exact parity needs) vs 2D + oracle
+     Lines are console.log'd as "UAVDIAG ..." for the driver to scrape. -->
+<html><head><meta charset="utf-8"><title>PENDING</title></head>
+<body style="margin:0;background:#000"><pre id="r">PENDING</pre>
+<script>
+const params = new URLSearchParams(location.search);
+const CLIP = params.get('clip') || 'clip.webm';
+let W = 320, H = 240;
+function log(m){ console.log('UAVDIAG ' + m); const e=document.getElementById('r'); e.textContent += '\n'+m; }
+function done(m){ document.title = m; log(m); }
+
+function meanAbs(a, b){ let s=0,mx=0; const n=W*H;
+  for(let i=0;i<n;i++)for(let c=0;c<3;c++){const d=Math.abs(a[i*4+c]-b[i*4+c]); s+=d; if(d>mx)mx=d;}
+  return {mean:s/(3*n), max:mx}; }
+function affine(gpu, ref){ // per-channel least squares gpu*a+b -> ref
+  const out=[]; const n=W*H;
+  for(let c=0;c<3;c++){ let sx=0,sy=0,sxx=0,sxy=0;
+    for(let i=0;i<n;i++){const x=gpu[i*4+c],y=ref[i*4+c]; sx+=x;sy+=y;sxx+=x*x;sxy+=x*y;}
+    const a=(n*sxy-sx*sy)/(n*sxx-sx*sx), b=(sy-a*sx)/n; out.push([a,b]); }
+  return out; }
+function depad(p, bpr){ const t=new Uint8Array(W*H*4),row=W*4;
+  for(let y=0;y<H;y++) t.set(p.subarray(y*bpr,y*bpr+row), y*row); return t; }
+
+function coeffs(matrix){ if(matrix==='bt709')return[0.2126,0.0722];
+  if(matrix==='bt470bg'||matrix==='smpte170m')return[0.299,0.114];
+  if(matrix==='bt2020-ncl'||matrix==='bt2020-cl')return[0.2627,0.0593];
+  return H<=576?[0.299,0.114]:[0.2126,0.0722]; }
+function makeMat(kr,kb,full){ const kg=1-kr-kb; let ys,yb,cs;
+  if(full){ys=1;yb=0;cs=1;}else{ys=255/(235-16);yb=16/255;cs=255/(240-16);}
+  return { m0:[ys,0,cs*(2-2*kr),0], m1:[ys,-cs*(2*kb*(1-kb)/kg),-cs*(2*kr*(1-kr)/kg),0],
+           m2:[ys,cs*(2-2*kb),0,0], yoff:[yb,0.5,0.5,0] }; }
+
+async function readback(device, target){
+  const bpr=Math.ceil(W*4/256)*256;
+  const buf=device.createBuffer({size:bpr*H, usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  const enc=device.createCommandEncoder();
+  enc.copyTextureToBuffer({texture:target},{buffer:buf,bytesPerRow:bpr,rowsPerImage:H},[W,H,1]);
+  device.queue.submit([enc.finish()]);
+  await buf.mapAsync(GPUMapMode.READ);
+  const out=depad(new Uint8Array(buf.getMappedRange()).slice(), bpr); buf.unmap(); return out;
+}
+
+async function main(){
+  const v=document.createElement('video');
+  v.muted=true; v.crossOrigin='anonymous'; v.playsInline=true; v.preload='auto'; v.src=CLIP;
+  await new Promise((res,rej)=>{v.onloadeddata=res; v.onerror=()=>rej('video-load-error');});
+  // Use the FIRST frame without playing, so 2D-ref / external / manual / ffmpeg
+  // oracle all read the SAME frame (no temporal mismatch on moving content).
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  if(v.readyState<2){ try{await v.play(); v.pause(); v.currentTime=0;}catch(e){}
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))); }
+  if(v.readyState<2) return done('FAIL video-no-data');
+  W=v.videoWidth||W; H=v.videoHeight||H;
+
+  if(!navigator.gpu) return done('FAIL no-webgpu');
+  const adapter=await navigator.gpu.requestAdapter(); if(!adapter) return done('FAIL no-adapter');
+  const device=await adapter.requestDevice();
+  const info=adapter.info||{};
+  log('adapter='+(info.vendor||'?')+'/'+(info.architecture||'?')+' '+W+'x'+H);
+
+  // 2D-canvas reference (browser's own <video> presentation, sRGB bytes).
+  const cc=document.createElement('canvas'); cc.width=W; cc.height=H;
+  const ctx=cc.getContext('2d'); ctx.drawImage(v,0,0,W,H);
+  const ref=ctx.getImageData(0,0,W,H).data;
+
+  let oracle=null;
+  try{ const ob=new Uint8Array(await(await fetch('oracle.rgba')).arrayBuffer());
+       if(ob.length===W*H*4) oracle=ob; }catch(e){}
+
+  const sampler=device.createSampler({magFilter:'linear',minFilter:'linear'});
+  const fmt='rgba8unorm';
+
+  // ---- ZERO-COPY: importExternalTexture ----
+  try{
+    const ext=device.importExternalTexture({source:v});
+    const tgt=device.createTexture({size:[W,H],format:fmt,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
+    const sh=device.createShaderModule({code:`
+      struct VO{@builtin(position) p:vec4f,@location(0) uv:vec2f};
+      @vertex fn vs(@builtin(vertex_index) i:u32)->VO{var q=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));
+        var o:VO; o.p=vec4f(q[i],0,1); o.uv=(q[i]*vec2f(0.5,-0.5))+vec2f(0.5); return o;}
+      @group(0)@binding(0) var s:sampler; @group(0)@binding(1) var t:texture_external;
+      @fragment fn fs(o:VO)->@location(0) vec4f{ return textureSampleBaseClampToEdge(t,s,o.uv); }`});
+    const pl=device.createRenderPipeline({layout:'auto',vertex:{module:sh,entryPoint:'vs'},
+      fragment:{module:sh,entryPoint:'fs',targets:[{format:fmt}]},primitive:{topology:'triangle-list'}});
+    const bg=device.createBindGroup({layout:pl.getBindGroupLayout(0),
+      entries:[{binding:0,resource:sampler},{binding:1,resource:ext}]});
+    const enc=device.createCommandEncoder();
+    const pass=enc.beginRenderPass({colorAttachments:[{view:tgt.createView(),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});
+    pass.setPipeline(pl); pass.setBindGroup(0,bg); pass.draw(3); pass.end();
+    device.queue.submit([enc.finish()]);
+    const g=await readback(device,tgt);
+    const d2=meanAbs(g,ref); const af=affine(g,ref);
+    log('EXTERNAL(zerocopy) vs2d_mean='+d2.mean.toFixed(3)+' max='+d2.max
+        +(oracle?(' oracle_mean='+meanAbs(g,oracle).mean.toFixed(3)):'')
+        +' fit R[a='+af[0][0].toFixed(3)+',b='+af[0][1].toFixed(1)+'] G[a='+af[1][0].toFixed(3)+',b='+af[1][1].toFixed(1)+'] B[a='+af[2][0].toFixed(3)+',b='+af[2][1].toFixed(1)+']');
+    // Ceiling of an in-shader affine correction: apply the per-channel fit back.
+    const gf=new Uint8Array(g.length);
+    for(let i=0;i<W*H;i++){ for(let c=0;c<3;c++){const x=g[i*4+c]; gf[i*4+c]=Math.max(0,Math.min(255,Math.round(af[c][0]*x+af[c][1])));} gf[i*4+3]=255; }
+    log('EXTERNAL+affine-correct vs2d_mean='+meanAbs(gf,ref).mean.toFixed(3)+(oracle?(' oracle_mean='+meanAbs(gf,oracle).mean.toFixed(3)):''));
+  }catch(e){ log('EXTERNAL FAIL '+(e&&e.message?e.message:e)); }
+
+  // ---- COPY-based manual conversion (WebCodecs planes + our matrix) ----
+  try{
+    if(typeof VideoFrame==='undefined') { log('WEBCODECS unavailable'); }
+    else {
+      const vf=new VideoFrame(v);
+      const csp=vf.colorSpace||{};
+      log('VideoFrame format='+vf.format+' coded='+vf.codedWidth+'x'+vf.codedHeight
+          +' colorSpace{matrix='+csp.matrix+' primaries='+csp.primaries+' transfer='+csp.transfer+' fullRange='+csp.fullRange+'}');
+      const cw=vf.codedWidth, ch=vf.codedHeight;
+      const size=vf.allocationSize(); const ab=new ArrayBuffer(size);
+      const layout=await vf.copyTo(ab); const u8=new Uint8Array(ab);
+      // Build tight Y,U,V (handle I420 + NV12).
+      let Y,U,Uc, planes;
+      function plane(idx,pw,ph){ const {offset,stride}=layout[idx]; const out=new Uint8Array(pw*ph);
+        for(let y=0;y<ph;y++) out.set(u8.subarray(offset+y*stride, offset+y*stride+pw), y*pw); return out; }
+      let yArr,uArr,vArr;
+      if(vf.format==='I420'||vf.format==='I420A'){
+        yArr=plane(0,cw,ch); uArr=plane(1,cw>>1,ch>>1); vArr=plane(2,cw>>1,ch>>1);
+      } else if(vf.format==='NV12'){
+        yArr=plane(0,cw,ch);
+        const {offset,stride}=layout[1]; const cwh=cw>>1, chh=ch>>1; uArr=new Uint8Array(cwh*chh); vArr=new Uint8Array(cwh*chh);
+        for(let y=0;y<chh;y++)for(let x=0;x<cwh;x++){const s=offset+y*stride+x*2; uArr[y*cwh+x]=u8[s]; vArr[y*cwh+x]=u8[s+1];}
+      } else { log('WEBCODECS unsupported format '+vf.format); vf.close(); throw 'fmt'; }
+      vf.close();
+      const mkTex=(data,pw,ph)=>{ const t=device.createTexture({size:[pw,ph],format:'r8unorm',
+        usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+        device.queue.writeTexture({texture:t},data,{bytesPerRow:pw,rowsPerImage:ph},[pw,ph]); return t; };
+      const tY=mkTex(yArr,cw,ch), tU=mkTex(uArr,cw>>1,ch>>1), tV=mkTex(vArr,cw>>1,ch>>1);
+      const [kr,kb]=coeffs(csp.matrix); const cm=makeMat(kr,kb,!!csp.fullRange);
+      const cbuf=device.createBuffer({size:80,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+      device.queue.writeBuffer(cbuf,0,new Float32Array([...cm.m0,...cm.m1,...cm.m2,...cm.yoff, W,H,0,0]));
+      const tgt=device.createTexture({size:[W,H],format:fmt,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
+      const sh=device.createShaderModule({code:`
+        struct VO{@builtin(position) p:vec4f,@location(0) uv:vec2f};
+        @vertex fn vs(@builtin(vertex_index) i:u32)->VO{var q=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));
+          var o:VO; o.p=vec4f(q[i],0,1); o.uv=(q[i]*vec2f(0.5,-0.5))+vec2f(0.5); return o;}
+        struct CM{m0:vec4f,m1:vec4f,m2:vec4f,yoff:vec4f,dims:vec4f};
+        @group(0)@binding(0) var s:sampler;
+        @group(0)@binding(1) var tY:texture_2d<f32>; @group(0)@binding(2) var tU:texture_2d<f32>;
+        @group(0)@binding(3) var tV:texture_2d<f32>; @group(0)@binding(4) var<uniform> cm:CM;
+        @fragment fn fs(o:VO)->@location(0) vec4f{
+          let y=textureSample(tY,s,o.uv).r; let u=textureSample(tU,s,o.uv).r; let vv=textureSample(tV,s,o.uv).r;
+          let ycc=vec3f(y,u,vv)-cm.yoff.xyz;
+          let rgb=vec3f(dot(cm.m0.xyz,ycc),dot(cm.m1.xyz,ycc),dot(cm.m2.xyz,ycc));
+          return vec4f(clamp(rgb,vec3f(0),vec3f(1)),1.0); }`});
+      const pl=device.createRenderPipeline({layout:'auto',vertex:{module:sh,entryPoint:'vs'},
+        fragment:{module:sh,entryPoint:'fs',targets:[{format:fmt}]},primitive:{topology:'triangle-list'}});
+      const bg=device.createBindGroup({layout:pl.getBindGroupLayout(0),entries:[
+        {binding:0,resource:sampler},{binding:1,resource:tY.createView()},{binding:2,resource:tU.createView()},
+        {binding:3,resource:tV.createView()},{binding:4,resource:{buffer:cbuf}}]});
+      const enc=device.createCommandEncoder();
+      const pass=enc.beginRenderPass({colorAttachments:[{view:tgt.createView(),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});
+      pass.setPipeline(pl); pass.setBindGroup(0,bg); pass.draw(3); pass.end();
+      device.queue.submit([enc.finish()]);
+      const g=await readback(device,tgt);
+      log('MANUAL(webcodecs+wgsl) vs2d_mean='+meanAbs(g,ref).mean.toFixed(3)
+          +(oracle?(' oracle_mean='+meanAbs(g,oracle).mean.toFixed(3)+' oracle_max='+meanAbs(g,oracle).max):''));
+    }
+  }catch(e){ log('MANUAL FAIL '+(e&&e.message?e.message:e)); }
+  done('DIAGDONE');
+}
+main().catch(e=>done('FAIL '+(e&&e.message?e.message:e)));
+</script></body></html>

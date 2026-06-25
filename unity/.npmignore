@@ -1,0 +1,24 @@
+# npm pack ignore list for the org.unitedav UPM package.
+
+# Built native plugins (users build from source).
+Runtime/Plugins/**/*.so
+Runtime/Plugins/**/*.so.meta
+Runtime/Plugins/**/*.dll
+Runtime/Plugins/**/*.dll.meta
+Runtime/Plugins/**/*.dylib
+Runtime/Plugins/**/*.dylib.meta
+
+# Unity / IDE scratch that could appear if the package dir is opened directly.
+Library/
+Temp/
+Obj/
+Logs/
+*.csproj
+*.sln
+*.user
+.vs/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

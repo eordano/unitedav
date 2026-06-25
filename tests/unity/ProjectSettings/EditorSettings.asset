@@ -1,0 +1,15 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!159 &1
+EditorSettings:
+  m_ObjectHideFlags: 0
+  serializedVersion: 12
+  # Force-text serialization + ordered meta keys keep any Unity-generated asset
+  # diffs reviewable, and the project reproducible across the build hub + CI.
+  m_SerializationMode: 2
+  m_LineEndingsForNewScripts: 1
+  m_DefaultBehaviorMode: 0
+  m_EnterPlayModeOptionsEnabled: 0
+  m_EnterPlayModeOptions: 3
+  m_ProjectGenerationIncludedExtensions: txt;xml;fnt;cd;asmdef;asmref;rsp
+  m_EnableEditorAsyncCPUTextureCreation: 1

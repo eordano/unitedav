@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# ThreadSanitizer suppressions scoped to FFmpeg-internal symbols ONLY, so
+# UnitedAV's own races still report.
+race:ff_refstruct_pool_get
+race:ff_refstruct_unref
+race:ff_refstruct_pool_uninit
+race:av_buffer_unref
+race:av_buffer_pool_get
+race:av_buffer_create
+race:ff_pthread_init
+race:ff_pthread_free
+race:ff_frame_thread_init
+race:ff_thread_decode_frame
+race:frame_worker_thread
+race:av_malloc
+race:av_mallocz
+
+thread:ff_frame_thread_init
+thread:frame_worker_thread

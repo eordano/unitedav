@@ -1,0 +1,17 @@
+{
+    "name": "UnitedAV.Samples.Showcase.Editor",
+    "rootNamespace": "UnitedAV.Samples.Showcase",
+    "references": [
+        "UnitedAV.Runtime",
+        "UnitedAV.Samples.Showcase"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

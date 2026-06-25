@@ -1,0 +1,9 @@
+# Intentionally empty.
+#
+# This Unity project has NO project-local test code. All EditMode + PlayMode
+# tests live INSIDE the org.unitedav package (unity/Tests/) and are discovered
+# via the "testables": ["org.unitedav"] entry in Packages/manifest.json.
+#
+# Unity will create .meta files alongside the contents of this folder on first
+# open; those are machine-generated and intentionally git-ignored for this
+# throwaway harness (see ../.gitignore).

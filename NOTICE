@@ -1,0 +1,42 @@
+UnitedAV
+Copyright The UnitedAV Authors
+
+This product is licensed under the Apache License, Version 2.0 (the "License");
+you may not use this product except in compliance with the License. You may
+obtain a copy of the License in the accompanying LICENSE file or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+================================================================================
+Third-party components
+================================================================================
+
+The UnitedAV source code (the C# package under unity/ and the native plugin
+under native/) is licensed under Apache-2.0.
+
+The built native plugin (libUnitedAV) DYNAMICALLY LINKS FFmpeg / libav, which is
+licensed under the GNU Lesser General Public License (LGPL), version 2.1 or
+later. UnitedAV links only LGPL-licensed FFmpeg components; it does not enable
+--enable-gpl or --enable-nonfree.
+
+FFmpeg / libav components used (LGPL-2.1+):
+  - libavformat   (demux / mux)
+  - libavcodec    (decode / encode)
+  - libavutil     (shared utilities)
+  - libswscale    (pixel-format / scale conversion)
+  - libswresample (audio resampling)
+
+Decoder/codec libraries reached through FFmpeg may carry their own permissive
+licenses, e.g. dav1d (BSD, AV1), libvpx (BSD, VP8/VP9), and libopus (BSD, Opus).
+
+LGPL obligations for binary redistribution
+------------------------------------------
+When redistributing a built plugin that links FFmpeg, you must honor the LGPL:
+
+  - Ship FFmpeg as separate, replaceable shared libraries (dynamic linking), so
+    a recipient can relink the plugin against a modified FFmpeg.
+  - Provide the corresponding FFmpeg source (or a written offer / link) for the
+    exact FFmpeg build shipped, along with the configure flags used.
+  - Include FFmpeg's license texts and attribution notices.
+
+See docs/licensing.md for details.

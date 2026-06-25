@@ -1,0 +1,23 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!129 &1
+PlayerSettings:
+  m_ObjectHideFlags: 0
+  serializedVersion: 28
+  productGUID: 6e6e6f6f7561766176556e69746573
+  companyName: UnitedAV
+  productName: UnitedAV.TestRunner
+  defaultCursor: {fileID: 0}
+  cursorHotspot: {x: 0, y: 0}
+  m_ShowUnitySplashScreen: 0
+  m_ShowUnitySplashLogo: 0
+  # Linear color space: the decoded-texture / sRGB contract consumers rely on is
+  # validated under Linear (gamma-correct) rendering, matching the package's
+  # RequiresVerticalFlip()/sRGB tests.
+  m_ActiveColorSpace: 1
+  m_StackTraceTypes: 010000000100000001000000010000000100000001000000
+  scriptingDefineSymbols: {}
+  additionalCompilerArguments: {}
+  allowUnsafeCode: 0
+  apiCompatibilityLevel: 6
+  gcIncremental: 1

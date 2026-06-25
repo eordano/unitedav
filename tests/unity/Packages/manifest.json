@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "org.unitedav": "file:../../../unity",
+    "com.unity.test-framework": "1.4.6",
+    "com.unity.modules.audio": "1.0.0",
+    "com.unity.modules.imageconversion": "1.0.0",
+    "com.unity.modules.jsonserialize": "1.0.0",
+    "com.unity.modules.unitywebrequest": "1.0.0"
+  },
+  "testables": [
+    "org.unitedav"
+  ]
+}
